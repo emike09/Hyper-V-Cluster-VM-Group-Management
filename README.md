@@ -2,14 +2,36 @@
 
 An interactive PowerShell menu for managing native **Hyper-V VM Groups** (`VMCollectionType`) on a Windows Server failover cluster.
 
-It was built to drive backup classification with **Veeam Backup & Replication**: Veeam discovers Hyper-V VM Groups, and a backup job can target a group instead of individual VMs. Adding a VM to a group puts it in that group's backup job, and moving it to another group reclassifies it. You never touch the Veeam job itself.
+Hyper-V has no GUI for VM Groups, and in a cluster they're easy to get wrong: they depend on a shared config store, different nodes can show different views, and membership has to be changed on the node that owns each VM. This script takes care of those details and gives you a menu for creating groups and moving VMs between them, with health checks and safety prompts.
 
 ```text
-Hyper-V VM  ->  VM Group membership  ->  Veeam job targets the group
-                                         (Development / Production / Critical ...)
+Hyper-V VM  ->  VM Group membership  ->  whatever consumes the group
+                (Development / Production / Critical ...)
 ```
 
-The script works without Veeam too. Any tool that reads VM Groups, or an admin who wants tidy grouping, can use it.
+---
+
+## What VM Groups are useful for
+
+A VM Group is a named, cluster-wide collection of VMs that tools and scripts can target as a unit. Common uses:
+
+- **Backup classification.** Backup products that understand Hyper-V VM Groups can target a group instead of individual VMs. For example, a Veeam Backup & Replication job pointed at a group picks up whatever VMs are in it, so moving a VM to another group changes which job protects it, without editing the job. This is the use case the script was originally built for, and several of its warnings are written with it in mind. Check your own backup product's documentation for VM Group support.
+- **Scripted bulk operations.** A group can stand in for a hard-coded list of VM names in your own scripts:
+
+  ```powershell
+  # Shut down every VM in the "Development" group before maintenance
+  (Get-VMGroup -Name Development -ComputerName <node>).VMMembers | Stop-VM
+
+  # Take a checkpoint of each VM in a group before patching
+  (Get-VMGroup -Name Production -ComputerName <node>).VMMembers |
+      Checkpoint-VM -SnapshotName "Pre-patch $(Get-Date -Format yyyy-MM-dd)"
+  ```
+
+- **Multi-tier applications.** Keep the VMs that make up one application (web, app, database) together so they can be handled as one unit.
+- **Hyper-V Replica.** Microsoft supports replicating VMs that share VHD Sets as a group.
+- **Organization and reporting.** Use groups as a classification you can see across the cluster, such as environment, owner or patch ring. The script's reporting options show which VMs aren't in any group.
+
+> This script manages **VM collection groups** (`VMCollectionType`) only. Management groups (`ManagementCollectionType`, groups of groups) are not created or changed.
 
 ---
 
@@ -24,7 +46,7 @@ The script works without Veeam too. Any tool that reads VM Groups, or an admin w
   - how many clustered VMs are in no group
 - **Diagnostics (`D`).** Runs the full health check, then compares group membership as seen from each node and from the cluster name. If the views disagree, it offers a VMMS restart.
 - **Stale member cleanup.** At startup, it finds group entries whose VM no longer exists on any node and offers to remove them.
-- **Built-in protection against losing backup coverage:**
+- **Safety prompts,** since group membership often drives something important, like backup coverage:
   - Move adds a VM to the new group *before* removing it from the old one, so the VM always stays in a group.
   - Every move and remove shows its plan first.
   - Removing a batch requires typing `REMOVE`.
@@ -127,7 +149,7 @@ Get-VMGroup
 
 **A node reboot may be needed afterward** for VM networking and VMMS to fully settle.
 
-Old groups are lost if their metadata lived on the removed CSV. Recreate them, re-add VMs, and rescan the cluster in Veeam. The new groups have new IDs, so update your jobs to point at them.
+Old groups are lost if their metadata lived on the removed CSV. Recreate them and re-add the VMs. The new groups have new IDs, so anything that referenced the old groups needs updating: for example, rescan the cluster in your backup product and re-point its jobs.
 
 </details>
 
@@ -211,7 +233,7 @@ Ranges can be written backwards (`7-4`), and duplicates are ignored. Invalid inp
 
 | Option | Behavior |
 |---|---|
-| **1. Add** | Skips VMs already in the target group. If a VM is already in a *different* group, you choose: add anyway (it'll be in two backup jobs), skip, or cancel. |
+| **1. Add** | Skips VMs already in the target group. If a VM is already in a *different* group, you choose: add anyway (it'll be in both groups, so anything targeting either group will include it), skip, or cancel. |
 | **2. Move** | Shows an `old -> new` plan and confirms once. Each VM is added to the new group first, then removed from the old one. VMs in more than one group are skipped. |
 | **3. Remove** | Shows a plan and flags VMs that will end up in **no group**. One VM needs `y`; a batch needs the word `REMOVE`. |
 | **4. List VMs** | Every clustered VM with owner node, state and group, plus a count of ungrouped VMs and VMs in more than one group. |
@@ -245,7 +267,7 @@ Ranges can be written backwards (`7-4`), and duplicates are ignored. Invalid inp
 | `Get-VMGroup : Generic failure` on every operation | `ConfigStoreRootPath` points to a path that no longer exists (CSV removed or renamed) or is offline. Run `D`, then see the recovery section above. |
 | Header shows a config store problem | The path doesn't match `$ExpectedConfigStore`, its CSV isn't Online, or a node can't reach it. |
 | Groups look different from different nodes | VMMS views have drifted. `D` shows which node differs and offers a VMMS restart. |
-| A rebuilt or restored VM dropped out of its backup job | The recreated VM has a new VM ID, so it isn't in the old group. It shows under **Ungrouped VMs**; add it back with option 1. |
+| A rebuilt or restored VM is no longer in its group (and dropped out of anything targeting that group, such as a backup job) | The recreated VM has a new VM ID, so it isn't in the old group. It shows under **Ungrouped VMs**; add it back with option 1. |
 | Stale-member check says "skipped" | A node is down. The check won't run until every node is online, so VMs on the down node aren't mistaken for deleted ones. |
 
 ---
@@ -283,4 +305,6 @@ Ranges can be written backwards (`7-4`), and duplicates are ignored. Invalid inp
 
 ## Disclaimer
 
-Provided as-is, without warranty. Test in a non-production cluster first. Changing VM Group membership changes which backup jobs protect a VM, so review what each operation will do before confirming.
+Provided as-is, without warranty. Test in a non-production cluster first. If anything in your environment targets VM Groups, such as backup jobs or automation scripts, changing membership changes what those tools act on. Review what each operation will do before confirming.
+
+Veeam and Veeam Backup & Replication are trademarks of Veeam Software. This project is not affiliated with or endorsed by Veeam.
